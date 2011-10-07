@@ -1,0 +1,9 @@
+#!/bin/bash
+# This is an example script to run to keep the jirc bridge running.
+# Run as: nohup ./looper &
+while :;
+do
+	mv jirc.log jirc.log.`date +%Y%m%d-%H%M%S`
+	jirc >jirc.log 2>&1
+	sleep 5
+done

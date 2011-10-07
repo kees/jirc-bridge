@@ -1,0 +1,1299 @@
+#!/usr/bin/perl
+#
+# Bridges an IRC channel to a Jabber conference room.
+#
+# Copyright (C) 2005-2009 Kees Cook
+# kees@outflux.net, http://outflux.net/
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+# http://www.gnu.org/copyleft/gpl.html
+#
+use warnings;
+use strict;
+use Getopt::Long qw(:config no_ignore_case bundling);
+use Pod::Usage;
+
+our $VERSION = "1.1";
+our $NAME    = "jirc";
+
+BEGIN {
+    use IO::Handle;
+    use Config::Simple;
+    use XML::Stream::Parser;
+    use Text::Wrap;
+    use POE qw/ Component::Jabber::ProtocolFactory /;
+    use POE::Component::IRC;
+    use POE::Component::Jabber;
+    use Filter::Template;
+    use POE::Filter::XML;
+    use POE::Filter::XML::Node;
+    use POE::Filter::XML::NS qw/ :JABBER :IQ /;
+    use POE::Filter::XML::Utils;
+    # Jabber communication parsers
+    use Net::Jabber;
+    use Net::Jabber::IQ;
+    use Net::Jabber::Message;
+    use Net::Jabber::Presence;
+    use Net::Jabber::JID;
+}
+
+=head1 NAME
+
+jirc - Bridges an IRC channel to a Jabber conference room.
+
+=head1 SYNOPSIS
+
+jirc [OPTIONS] --config CONFIG
+
+ -C, --config CONFIG  Load config file as specified by CONFIG
+ -V, --version        Report version of script
+ -h, --help           Show detailed documentation.
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-C CONFIG>, B<--config CONFIG>
+
+Specify the configuration file to load.  Required.
+
+=item B<-V>, B<--version>
+
+Report the version of this script.
+
+=item B<-h>,B<--help>
+
+Show detailed documentation.
+
+=back
+
+=head1 DESCRIPTION
+
+The jirc bot logs into an IRC channel and a Jabber conference room.  It will
+relay conversations between the two rooms, identifying each of the speakers
+in braces ([]).  Actions are forwarded as well.
+
+There are some in-room commands that jirc responds to:
+
+ !help       Display summary of available jirc commands.
+ !who        Display a list of people online on the other end of the bridge.
+ !shutdown   Immediately quit the rooms and shutdown.
+
+=head1 CONFIGURATION
+
+The file specified with the B<--config> option contains field/value pairs,
+one per line:
+
+ field: value
+
+For example:
+
+ mode: production
+
+The required configuration fields are:
+
+=over 8
+
+=item B<mode>
+
+Can be either "production" or "test".  When running in "test" mode, the
+nicks and channel names all have "-test" appended to them so that jirc
+behavior can be tested in separate channel.
+
+=item B<irc-nick>
+
+The IRC nickname to sign in with.  Since this is a bridge, a short nick is
+recommended.  To avoid confusion, it should match the B<jabber-alias>.
+
+=item B<irc-username>
+
+The IDENT username to sign in with.  Since this is a bridge, a short name is
+recommended.  To avoid confusion, it should match the B<irc-nick>.
+
+=item B<irc-ircname>
+
+The IRC Username to sign in with.  Since this is a bridge, a description
+of the bridge and a contact email address is recommended.
+
+=item B<irc-chan>
+
+The IRC channel to join; the IRC side of the bridge.
+
+=item B<irc-server>
+
+The IRC server to join.
+
+=item B<jabber-protocol>
+
+The Jabber protocol to use, either "XMPP" or "Legacy".
+
+=item B<jabber-id>
+
+The Jabber identifier, in the form: NAME@SERVER/RESOURCE
+
+=item B<jabber-server-ip>
+
+Not all Jabber servers run on the same IP as the A record
+for their domain indicates. If your server runs like this,
+set the correct IP or hostname here. Note that jirc doesn't
+currently pay attention to SRV records.
+
+=item B<jabber-password>
+
+The password for the Jabber ID.
+
+=item B<jabber-plaintext>
+
+Set to "1" to allow the password to be sent over the wire in plaintext
+or not - you'll need this for some servers that don't support
+DIGEST-MD5 with legacy authentication.  (Default: 0)
+
+=item B<jabber-reconnect-delay>
+
+How long to wait in seconds between disconnects before attempting a
+reconnect.  (Default: 0)
+
+=item B<jabber-port>
+
+The port to use for Jabber connections.  This is normally 5222.
+
+=item B<jabber-conference>
+
+The name of the Jabber conference room to join, in the form ROOM@SERVER
+
+=item B<jabber-alias>
+
+The Jabber alias to use when joining the Jabber conference room.  Since
+this is a bridge, a short nick is recommend.  To avoid confusion, it should
+match the B<irc-nick>.
+
+=item B<jabber-admin>
+
+The email address of this bot's owner.
+
+=item B<prefix>
+
+The prefix used for the built-in in-room commands.  This is normally "!".
+
+=item B<quiet-status>
+
+Suppress bridging of status messages (joins, parts and presence changes). 
+Normally 0.
+
+=item B<irc-port>
+
+The port to use for IRC connections.  This is normally 6667.
+
+=item B<irc-reconnect>
+
+How many seconds to wait until reconnecting after a missed IRC "TIME" response.
+This is normally 60.
+
+=item B<irc-time-delay>
+
+How many seconds between "TIME" requests.  This is normally 30.
+
+=item B<irc-debug>
+
+When set to 1, this enables verbose debugging of the IRC side of communications.
+This is normally 0.
+
+=item B<jabber-debug>
+
+When set to 1, this enables verbose debugging of the Jabber side of
+communications.  This is normally 0.
+
+=item B<debug>
+
+When set to 1, this enable verbose debugging of the general operation of the
+jirc bridge.  This is normally 0.
+
+=back
+
+=head1 AUTHOR
+
+Kees Cook <kees@outflux.net>
+
+=head1 COPYRIGHT
+
+Copyright 2005-2009 by Kees Cook <kees@outflux.net>.
+This program is licensed under the terms of the GNU General Public License.
+
+=cut
+
+sub Version
+{
+        print "$NAME version $VERSION\n";
+        print "Copyright 2005-2009 Kees Cook <kees\@outflux.net>\n";
+        print "This program is licensed under the terms of the GNU General Public License.\n";
+        exit(0);
+}
+
+our $opt_help    = undef;
+our $opt_version = undef;
+our $opt_config  = undef;
+
+GetOptions(
+    "config|C=s",
+    "help|h",
+    "version|V",
+    ) || pod2usage(2);
+pod2usage( -exitval => 0, -verbose => 2 ) if ($opt_help);
+Version() if ($opt_version);
+pod2usage(2) if (!defined($opt_config));
+
+# TODO:
+#  - irc nick collision
+#  - jabber nick collision
+
+# Configuration Management
+my $cfgfile = new Config::Simple($opt_config);
+die "Cannot load config file '$opt_config': $!\n" if (!defined($cfgfile));
+my %cfg = $cfgfile->vars();
+
+sub jirc_config
+{
+    my ($param,$default) = @_;
+
+    if (!defined($cfg{$param})) {
+        if (!defined($default)) {
+            die "Unconfigured setting: '$param'!\n";
+        }
+        else {
+            $cfg{$param} = $default;
+        }
+    }
+    return $cfg{$param};
+}
+die "Your configurable is not complete.  Please check documentation.\n"
+    if (!defined($cfg{'mode'}) ||
+        jirc_config('mode') eq "unconfigured");
+
+# Flush!
+select STDOUT; $|=1;
+
+# XML Parser
+my $parser=new XML::Stream::Parser(style=>'node');
+
+# IRC via POE
+#sub POE::Kernel::TRACE_REFCNT () { 1 }
+#sub POE::Kernel::ASSERT_DEFAULT () { 1 }
+
+
+# optional
+my $IRC_NICKSERV=$cfg{'irc-nickserv'} || "";
+my $IRC_IDENTIFY=$cfg{'irc-identify'} || "";
+
+# required
+my $testmode=jirc_config('mode') eq "test";
+
+my $IRC_NICK=jirc_config('irc-nick');
+my $IRC_USER=jirc_config('irc-username');
+my $IRC_NAME=jirc_config('irc-ircname');
+my $IRC_CHAN=jirc_config('irc-chan');
+if ($testmode) {
+    $IRC_NICK.="test";
+    $IRC_CHAN.="test";
+}
+my $IRC_SERVER=jirc_config('irc-server');
+my $IRC_PORT=jirc_config('irc-port');
+
+# How many seconds to wait until reconnecting after a missed "TIME" response
+my $IRC_RECONNECT_TIMER=jirc_config('irc-reconnect');
+# How often to request the "TIME" response, in seconds (must be less than recon)
+my $IRC_TIME_DELAY=jirc_config('irc-time-delay');
+
+my $IRC_DEBUG=jirc_config('irc-debug');
+my $IRC_LINE_MAX=jirc_config('irc-line-max');
+
+my $CMD_PREFIX=jirc_config('prefix');
+
+my $JABBER_PROTOCOL=jirc_config('jabber-protocol');
+if ($JABBER_PROTOCOL =~ /xmpp/i) {
+    $JABBER_PROTOCOL = +XMPP;
+} elsif ($JABBER_PROTOCOL =~ /legacy/i) {
+    $JABBER_PROTOCOL = +LEGACY;
+} else {
+    die "jabber-protocol must be either 'XMPP' or 'Legacy'\n";
+}
+my $JABBER_ID=jirc_config('jabber-id');
+if ($testmode) {
+    $JABBER_ID.="test";
+}
+my $JABBER_PORT=jirc_config('jabber-port');
+my $JABBER_PASSWORD=jirc_config('jabber-password');
+my $JABBER_PLAINTEXT=jirc_config('jabber-plaintext',0);
+my $JABBER_RECONNECT_DELAY=jirc_config('jabber-reconnect-delay',0);
+my $JABBER_CHAN_NAME=jirc_config('jabber-conference');
+my $JABBER_CHAN_ALIAS=jirc_config('jabber-alias');
+if ($testmode) {
+    $JABBER_CHAN_NAME=~s/^([^\@]+)\@/$1test\@/;
+    $JABBER_CHAN_ALIAS.='test';
+}
+my $JABBER_DEBUG=jirc_config('jabber-debug');
+my $JABBER_ADMIN=jirc_config('jabber-admin');
+
+my ($JABBER_NAME, $JABBER_RESOURCE)=split('/',$JABBER_ID,2);
+my ($JABBER_SCREENNAME,$JABBER_SERVER)=split('@',$JABBER_NAME,2);
+my ($JABBER_CHAN_SCREENNAME,$JABBER_CHAN_SERVER)=split('@',$JABBER_CHAN_NAME,2);
+my $JABBER_SERVER_IP=jirc_config('jabber-server-ip', $JABBER_SERVER);
+
+my $QUIET_STATUS=jirc_config('quiet-status', 0);
+
+# Wrapping
+$Text::Wrap::columns = $IRC_LINE_MAX;
+
+my $irc_client="irc_client";
+my $jabber_client="jabber_client";
+
+my $TO_JABBER="jabber";
+my $TO_IRC="irc";
+
+#open DEBUG, ">>$irc_client.log" or die "Can't open log file: $!\n";
+#DEBUG->autoflush(1);
+
+# Track channel membership
+my %jabber_chan_members;
+
+#####################################################################
+## General functions
+#####################################################################
+
+sub debug {
+    my @list = @_;
+    for (@list) {
+        $_ ||= '<null>';
+        chomp;
+        #print DEBUG localtime(time).": $_\n";
+        print localtime(time).": $_\n" if (jirc_config("debug"));
+    }
+}
+
+
+#####################################################################
+## Jabber
+#####################################################################
+
+# based on dufus - a POE jabber bot
+#
+
+my %XMPP_CLASS = ( 'iq'       => "Net::Jabber::IQ",
+                   'message'  => "Net::Jabber::Message",
+                   'presence' => "Net::Jabber::Presence",
+                   'jid'      => "Net::Jabber::JID",
+                 );
+
+POE::Session->create(
+    options => { debug => $JABBER_DEBUG, trace => $JABBER_DEBUG },
+    inline_states => {
+        _start =>
+            sub
+            {
+                my ($kernel, $heap) = @_[KERNEL, HEAP];
+                $kernel->alias_set('jabberBot');
+
+                $heap->{'admin'} = $JABBER_ADMIN;
+                $heap->{'component'} = POE::Component::Jabber->new(
+                    IP => $JABBER_SERVER_IP,
+                    Port => $JABBER_PORT,
+                    Hostname => $JABBER_SERVER,
+                    Username => $JABBER_SCREENNAME,
+                    Password => $JABBER_PASSWORD,
+                    Plaintext => $JABBER_PLAINTEXT,
+                    Resource => $JABBER_RESOURCE,
+                    ConnectionType => $JABBER_PROTOCOL,
+                    Alias => $jabber_client,
+                    Debug => $JABBER_DEBUG,
+                );
+
+                $kernel->post($jabber_client, 'subscribe', +PCJ_READY, 'jabber_ready');
+                $kernel->post($jabber_client, 'subscribe', +PCJ_NODERECEIVED, 'jabber_node');
+
+                $kernel->post($jabber_client, 'subscribe', +PCJ_SSLFAIL, 'jabber_connect_failure');
+                $kernel->post($jabber_client, 'subscribe', +PCJ_AUTHFAIL, 'jabber_connect_failure');
+                $kernel->post($jabber_client, 'subscribe', +PCJ_BINDFAIL, 'jabber_connect_failure');
+                $kernel->post($jabber_client, 'subscribe', +PCJ_SESSIONFAIL, 'jabber_connect_failure');
+                $kernel->post($jabber_client, 'subscribe', +PCJ_SOCKETFAIL, 'jabber_connect_failure');
+                $kernel->post($jabber_client, 'subscribe', +PCJ_SOCKETDISCONNECT, 'jabber_connect_failure');
+                $kernel->post($jabber_client, 'subscribe', +PCJ_CONNECTFAIL, 'jabber_connect_failure');
+
+                $kernel->post($jabber_client, 'connect');
+
+
+                $kernel->sig( INT => 'bot_signal' );
+                $kernel->sig( ALRM => 'bot_signal' );
+                $kernel->sig( PIPE => 'bot_signal' );
+                $kernel->sig( HUP => 'bot_signal' );
+                $kernel->sig( TERM => 'bot_signal' );
+
+                $kernel->delay('timer_tick' => 3*60);
+            },
+
+        _stop =>
+            sub
+            {
+                my $kernel = $_[KERNEL];
+                $kernel->alias_remove('jabberBot');
+                debug ("Jabber POE::Session Dying");
+            },
+
+        jabber_ready => \&jabber_ready,
+        jabber_node => \&jabber_node,
+        jabber_connect_failure => \&jabber_connect_failure,
+
+        on_iq         => \&jabber_on_iq,
+        on_message    => \&jabber_on_message,
+        on_jid        => \&jabber_on_jid,
+        on_presence   => \&jabber_on_presence,
+
+        bot_signal    => \&jabber_bot_signal,
+        timer_tick    => \&timer_tick,
+
+    }
+);
+
+
+sub jabber_bot_signal()
+{
+    my ($kernel,$signal) = @_[KERNEL, ARG0];
+
+    $kernel->sig_handled();
+
+    print STDERR "\n\n$signal\n\n";
+
+    if ($signal eq "INT") {
+    exit;
+    }
+}
+
+sub toXNode
+{
+    my ($sn)=@_;
+
+    my %hash = $sn->attrib();
+    my @attribs = map { $_, $hash{$_} } sort keys %hash;
+    my $xn = POE::Filter::XML::Node->new($sn->get_tag(),\@attribs);
+
+    foreach my $child ($sn->children()) {
+        if ($child->get_tag() eq "__xmlstream__:node:cdata") {
+            $xn->appendText($child->children());
+        }
+        else {
+            $xn->appendChild(toXNode($child));
+        }
+    }
+
+    return $xn;
+}
+
+sub jabber_ready()
+{
+    my ($kernel, $sender, $heap, $status) = @_[KERNEL, SENDER, HEAP, ARG0];
+
+    my $jid = $heap->{'component'}->jid();
+    $heap->{'jid'} = $jid;
+    ($heap->{'screenname'},$heap->{'resource'}) = split('/',$jid,2);
+
+    # Mark ourself online
+    my $presence = new Net::XMPP::Presence();
+    $presence->SetShow('Online');
+    my $node = toXNode($presence->GetTree());
+    $kernel->post($jabber_client, 'output', $node);
+
+    # request roster to get subscribe updates
+    my $iq = new Net::XMPP::IQ();
+    $iq->SetIQ(type=>'get');
+    my $query = $iq->NewChild("jabber:iq:roster");
+    $node = toXNode($iq->GetTree());
+    $kernel->post($jabber_client, 'output', $node);
+
+    # Join the channel
+    my $chan = new Net::XMPP::Presence();
+    $chan->SetPresence(to=>join("/",$JABBER_CHAN_NAME,$JABBER_CHAN_ALIAS));
+    $node = toXNode($chan->GetTree());
+    $kernel->post($jabber_client, 'output', $node);
+}
+
+sub timer_tick()
+{
+    my ($kernel, $sender, $heap, $status) = @_[KERNEL, SENDER, HEAP, ARG0];
+
+    # request roster to get subscribe updates
+    my $iq = new Net::XMPP::IQ();
+    $iq->SetIQ(type=>'get');
+    my $query = $iq->NewChild("urn:xmpp:ping");
+    my $node = toXNode($iq->GetTree());
+    $kernel->post($jabber_client, 'output', $node);
+
+    $kernel->delay('timer_tick' => 3*60);
+}
+
+sub jabber_node()
+{
+    my ($node) = $_[ARG0];
+    my ($query,$xmlns,$subject);
+
+    my $str = $node->toString();
+    debug("XML string: $str");
+    $parser->parse($str);
+    my $xml = $parser->returnData(1);
+    my $tag = $xml->get_tag();
+
+    my $xmpp;
+
+    my $class = $XMPP_CLASS{$tag};
+    if (defined($class)) {
+        eval " \$xmpp = new $class(\$xml); ";
+
+        if (defined($xmpp)) {
+            $_[KERNEL]->post($_[SESSION]->ID,"on_$tag",$xmpp);
+        }
+        else {
+            debug("Failed for instantiate $tag: $str");
+        }
+    }
+    else {
+        debug("unknown XML: $str");
+    }
+}
+
+sub jabber_on_iq
+{
+    my ($kernel, $heap, $iq) = @_[KERNEL, HEAP, ARG0];
+    debug "iq: ".$iq->GetXML();
+
+    # If we don't respond to a ping, we get kicked.
+    # typical ping:
+    # <iq id="ping" type="get" from="jabber.org" to="jirc@jabber.org/bot"><ping xmlns="urn:xmpp:ping"/></iq>
+    # only guarentee is that the inner node will be tagname ping and xmlns urn:xmpp:ping
+    # http://xmpp.org/extensions/xep-0199.html
+    if ($iq->GetQuery()->GetXML() =~ /urn:xmpp:ping/) {
+        debug "XMPP ping received";
+        jabber_iq('result', $iq->GetID(), $iq->GetFrom(), $iq->GetTo());
+        # required pong (id must be same, from and to flipped, and type=result)
+        # <iq id="ping" type="result" to="jabber.org" from="jirc@jabber.org/bot"/>
+    }
+}
+
+#Thu Jun 23 14:04:48 2005: presence: <presence from='inkscape@conference.gristle.org/kees' to='jirc@gristle.org/daemon' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='owner' jid='nem@gristle.org/Laptop' role='none'/></x></presence>
+# Thu Jun 23 14:04:58 2005: presence: <presence from='inkscape@conference.gristle.org/kees' to='jirc@gristle.org/daemon'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='owner' jid='nem@gristle.org/Laptop' role='moderator'/></x></presence>
+# Tue Feb 13 10:52:53 2007: presence(error): <presence from='inkscape@conference.gristle.org/^-' to='jirc@gristle.org/daemon' type='error'><error code='502'>Internal Timeout</error></presence>
+sub jabber_on_presence
+{
+    my ($kernel, $heap, $presence) = @_[KERNEL, HEAP, ARG0];
+
+    if ($presence->GetType() eq "subscribe") {
+        my $reply = $presence->Reply();
+        $reply->SetType("subscribed");
+        debug("subscribed");
+
+        my $node = toXNode($reply->GetTree());
+        $kernel->post($jabber_client, 'output', $node);
+    }
+    else {
+        my $type=$presence->GetType() || "";
+        $type="available" if ($type eq "");
+
+        my $from=$presence->GetFrom();
+
+        debug "presence($type): ".$presence->GetXML();
+        if ($type eq "error" &&
+            $from =~ m#^$JABBER_CHAN_NAME/([^/]+)$# &&
+            $1 eq $JABBER_CHAN_ALIAS) {
+
+            # got disconnected from the room?
+            # Immediately reconnect.
+            $kernel->post($jabber_client, 'reconnect');
+        }
+
+        if ($from =~ m|^$JABBER_CHAN_NAME/([^/]+)$| &&
+            $1 ne $JABBER_CHAN_ALIAS) {
+
+            my $jid=$1;
+            if ($type eq "available") {
+                $jabber_chan_members{$jid}=1;
+            }
+            elsif ($type eq "unavailable") {
+                delete $jabber_chan_members{$jid};
+            }
+        }
+    }
+}
+
+sub jabber_on_message
+{
+    my ($kernel, $heap, $message) = @_[KERNEL, HEAP, ARG0];
+    #debug "message: ".$message->GetXML();
+
+    my $type = $message->GetType();
+    return if $type eq 'error';
+
+    my $to = $message->GetTo();
+    my $from = $message->GetFrom();
+    my $subject = $message->GetSubject();
+    my $who = '';
+    my $channel = '';
+    my $nick = '';
+    ($channel,$who) = split('/',$from);
+    my ($jid,$res) = split('/',$to);
+
+    # from the channel itself:
+    # Tue Feb 15 08:58:28 2005: message: <message from='ktest@conference.gristle.org' to='jirc@gristle.org/testing' type='groupchat'><body>nem has become available</body></message>
+
+    debug "jabber_on_message: ".$message->GetXML();
+
+    my $body = $message->GetBody();
+
+    if ($type eq "chat") {
+        $body =~ s/[\cA-\c_]//ig; # strip control characters
+        jabber_msg('chat', "you said: \"$body\"",$from,$to);
+    }
+    elsif ($type eq 'groupchat') {
+        if (lc($who) eq lc($JABBER_CHAN_ALIAS)) {
+            debug "dropping message from self: ".$message->GetXML();
+            return;
+        }
+
+        # Skip delayed messages
+        if ($message->GetX('jabber:x:delay')) {
+            debug "dropping delayed message: ".$message->GetXML();
+            return;
+        }
+
+        # Where is this msg coming from?
+        my $prefix="";
+        if (!defined($who) || $who eq "") {
+            # This is a msg from the conference room
+            my($subject,$reminder)=split(/\s+/,$body,2);
+
+            # Suppress uninteresting notices
+            if ($body eq "This room supports the MUC protocol." ||
+                $subject eq $JABBER_CHAN_ALIAS ||
+                $body eq $JABBER_CHAN_SCREENNAME ||
+                $body =~ /^\S+ has set the topic to:/ ||
+                $QUIET_STATUS ||
+                $body =~ /^This room .* is not anonymous$/) {
+                debug "ignoring uninteresting message: ".$message->GetXML();
+                return;
+            }
+            $prefix="* ";
+        }
+        else {
+            $prefix="[$who] ";
+        }
+
+        # Check for commands
+        if ($body =~ /^\s*${CMD_PREFIX}(.*)$/) {
+            return if (process_cmd($kernel,$1,$TO_JABBER));
+        }
+
+        print "Relaying: ".$message->GetXML()."\n";
+
+        if ($body =~ /^\/me ([^\r\n]*)$/) {
+            my $action = $1;
+            to_channel("*** $who $action",$TO_IRC);
+            return;
+        }
+
+        my @sections = split(/\r?\n/,$body);
+        foreach my $section (@sections) {
+            $section =~ s/[\cA-\c_]//ig; # strip control characters
+
+            my @lines;
+            if (length($section)+length($prefix)>$IRC_LINE_MAX) {
+                @lines=split(/\n/,wrap($prefix,$prefix,$section));
+            }
+            else {
+                push(@lines,$prefix.$section);
+            }
+            foreach my $line (@lines) {
+                to_channel($line,$TO_IRC);
+            }
+        }
+    }
+    else {
+        print "Got: ".$message->GetXML()."\n";
+        print "\tto: $to\n";
+        print "\tfrom: $from\n";
+        print "\ttype: $type\n";
+        print "\tmessage: $message\n";
+        print "\tsubject: ".($subject||"")."\n";
+    }
+}
+
+sub jabber_on_jid
+{
+    my ($kernel, $heap, $jid) = @_[KERNEL, HEAP, ARG0];
+    debug "jid: ".$jid->GetXML();
+}
+
+# Too bad PCJ doesn't provide a way to find out which even this was...
+sub jabber_connect_failure()
+{
+    my ($kernel,$sender,$error) = @_[KERNEL, SENDER, ARG0];
+    my ($call, $code, $err) = @_[ARG1..ARG3];
+    print "Jabber busted: $error, $call, $code, $err\n";
+    sleep($JABBER_RECONNECT_DELAY);
+    $kernel->post($sender, 'reconnect');
+}
+
+
+sub is_utf8($)
+{
+    my $x = shift;
+    return $x =~ m/\A(?:
+         [\x09\x0A\x0D\x20-\x7E]               # ASCII
+       | [\xC2-\xDF][\x80-\xBF]             # non-overlong 2-byte
+       |  \xE0[\xA0-\xBF][\x80-\xBF]        # excluding overlongs
+       | [\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}  # straight 3-byte
+       |  \xED[\x80-\x9F][\x80-\xBF]        # excluding surrogates
+       |  \xF0[\x90-\xBF][\x80-\xBF]{2}     # planes 1-3
+       | [\xF1-\xF3][\x80-\xBF]{3}          # planes 4-15
+       |  \xF4[\x80-\x8F][\x80-\xBF]{2}     # plane 16
+      )*\z/x;
+}
+
+sub jabber_msg($$$$)
+{
+    my $type = shift;
+    my $message = shift;
+    my $to      = shift;
+    my $from    = shift;
+
+    my $node = POE::Filter::XML::Node->new('message');
+    if ($node->can('attr')) {
+        $node->attr('to',$to);
+        $node->attr('from',$from);
+        $node->attr('type',$type);
+    }
+    else {
+        $node->setAttributes(['to' => $to, 'from' => $from, 'type' => $type]);
+    }
+
+    # Translate IRC-isms into common text-only meanings
+    $message =~ s/\x1F([^\x1F]*)\x1F/_${1}_/gs;
+    $message =~ s/\x02([^\x02]*)\x02/*${1}*/gs;
+
+    # Encode weird crap since POE::Filter::XML::Node's data isn't safe!!
+    if (!is_utf8($message)) {
+        $message =~ s/([^\x20-\x7F])/'&#' . ord($1) . ';'/gse;
+    }
+
+    # I was using rawdata, but that doesn't seem to work
+    if ($node->can('insert_tag')) {
+        $node->insert_tag('body')->data($message);
+    }
+    else {
+        $node->appendTextChild('body',$message);
+    }
+
+    $poe_kernel->post($jabber_client, 'output', $node);
+}
+
+# jabber_iq(type, id, to, from)
+sub jabber_iq($$$$)
+{
+    my $type = shift;
+    my $id = shift;
+    my $to      = shift;
+    my $from    = shift;
+
+    my $node = POE::Filter::XML::Node->new('iq');
+    if ($node->can('attr')) {
+        $node->attr('to',$to);
+        $node->attr('from',$from);
+        $node->attr('type',$type);
+        $node->attr('id',$id);
+    }
+    else {
+        $node->setAttributes(['to' => $to, 'from' => $from, 'type' => $type, 'id' => $id]);
+    }
+
+    $poe_kernel->post($jabber_client, 'output', $node);
+}
+
+
+
+#####################################################################
+## IRC
+#####################################################################
+
+my ($poeirc) = POE::Component::IRC->spawn('alias' => $irc_client)
+    or die "POE::C::IRC->spawn failed: $!";
+
+POE::Session->create(
+  options => { debug => $IRC_DEBUG, trace => $IRC_DEBUG },
+  inline_states => {
+    _start=>\&irc_startup,
+    _default=>\&irc_default,
+
+    reconnect=>\&irc_reconnect,
+    told=>\&irc_told,
+    want_time=>\&irc_want_time,
+    on_time=>\&irc_on_time,
+
+#    do_op=>\&irc_do_op,
+
+    irc_001=>\&irc_on_connect,
+    irc_connected=>\&irc_on_connect,
+#    irc_registered=>\&irc_on_connect,
+
+    irc_public=>\&irc_on_public,
+    irc_join=>\&irc_on_join,
+    irc_part=>\&irc_on_part,
+    irc_quit=>\&irc_on_quit,
+    irc_msg=>\&irc_on_private,
+    irc_ctcp_action=>\&irc_on_action,
+    irc_nick=>\&irc_on_nick,
+    irc_kick=>\&irc_on_kick,
+    irc_invite=>\&irc_on_invite,
+    irc_mode=>\&irc_on_mode,
+    irc_353=>\&irc_on_names,
+    irc_366=>\&irc_on_names_done,
+    irc_332=>\&irc_on_topicraw,
+    irc_391=>\&irc_on_time,
+    irc_topic=>\&irc_on_topic,
+    irc_disconnected=>\&irc_reconnect,
+  },
+);
+
+
+
+sub irc_default {
+    my($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+}
+
+sub irc_startup {
+    my($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my @args = @_[ARG0..$#_];
+
+    my %config;
+    $config{nick}=$IRC_NICK;
+    $config{username}=$IRC_USER;
+    $config{ircname}=$IRC_NAME;
+    $config{nickserv}=$IRC_NICKSERV;
+    $config{identify}=$IRC_IDENTIFY;
+    $config{server}=$IRC_SERVER;
+    $config{port}=$IRC_PORT;
+
+    $heap->{config} = \%config;
+
+    $heap->{connect} = {
+        Nick => $config{nick},
+        Username => $config{username},
+        Ircname => $config{ircname},
+        Server => $config{server},
+        Port => $config{port} || 6667,
+        Ircname => $config{ircname},
+        Debug => $IRC_DEBUG,
+    };
+
+    $kernel->post($irc_client=>register=>'all');
+    $kernel->post($irc_client=>connect=>$heap->{connect});
+}
+
+sub irc_get_nick {
+    my ($nick) = @_;
+    return unless $nick;
+    $nick =~ /^(.*)!(.*)@(.*)$/;
+    return $1 or $nick;
+}
+
+sub irc_told {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nick, $channel, $message) = @_[ARG0..$#_];
+
+    $message =~ s/^\s*//;
+    $message =~ s/\s*$//;
+
+    my $sender = $channel || $nick;
+
+    my ($command, $param) = split(/\s+/, $message, 2);
+    $command = lc($command);
+
+    if ($command eq "who") {
+        $kernel->post($irc_client, 'names', $param || $channel) if ($channel or $param);
+    }
+    elsif ($command eq "help") {
+        $kernel->post($irc_client, 'privmsg', $sender, "I'm $irc_client.  Commands: ${CMD_PREFIX}help, ${CMD_PREFIX}who");
+    }
+}
+
+
+#############################################################################
+## Event handlers
+#############################################################################
+
+sub irc_on_public {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $channels, $message) = @_[ARG0..$#_];
+    my $nick = irc_get_nick($nickstring);
+
+    $kernel->yield('on_time');
+
+    return if ($nick eq $IRC_NICK);
+
+    if ($message =~ /^\s*${CMD_PREFIX}(.*)$/ &&
+        process_cmd($kernel,$1,$TO_IRC)) {
+        # don't forward command across to other channel
+    }
+    else {
+        # Why are ACTIONs coming through here instead of irc_on_action?!
+        if ($message =~ /^\cAACTION /) {
+            $message =~ s/^\cAACTION //;
+            to_channel("*** $nick $message",$TO_JABBER);
+        } else {
+            to_channel("[$nick] $message",$TO_JABBER);
+        }
+        #debug("<$nick\@$channels->[0]> $message");
+    }
+}
+
+# Why doesn't this get called anymore?
+sub irc_on_action {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $channels, $message) = @_[ARG0..$#_];
+
+    my $nick = irc_get_nick($nickstring);
+
+    return if ($nick eq $IRC_NICK);
+
+    to_channel("*** $nick $message",$TO_JABBER);
+}
+
+sub irc_on_private {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $recipients, $message) = @_[ARG0..$#_];
+    my $nick = irc_get_nick($nickstring);
+
+    $kernel->yield('on_time');
+
+    debug("<$nick> $message");
+    $message =~ s/^!//;
+    $kernel->yield('told', $nick, undef, $message);
+}
+
+sub irc_on_connect {
+    my($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my @args = @_[ARG0..$#_];
+
+    debug("Connected to IRC server\n");
+
+    $kernel->yield('on_time');
+
+    # identify nick
+    if ($heap->{config}{'nickserv'} ne "") {
+        $kernel->post($irc_client, 'privmsg', $heap->{config}{'nickserv'}, 'identify '.$heap->{config}{'identify'});
+    }
+
+    my $channel=$IRC_CHAN;
+    $heap->{channels}{$channel}=1;
+    $kernel->post($irc_client=>join=>$channel);
+#    $kernel->delay("do_op", 30);
+}
+
+# we have joined a channel
+sub irc_on_join {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $channel) = @_[ARG0..$#_];
+    my $nick = irc_get_nick($nickstring);
+
+    $kernel->yield('on_time');
+
+    if (lc($nick) eq lc($heap->{config}{nick})) {
+        debug("Joined $channel");
+    } else {
+        if (! $QUIET_STATUS) {
+            to_channel("* joined: $nick",$TO_JABBER);
+        };
+        #debug("$nick just joined $channel");
+    }
+}
+
+sub irc_on_part {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $channel, $reason) = @_[ARG0..$#_];
+    my $nick = irc_get_nick($nickstring);
+
+    $kernel->yield('on_time');
+
+    #debug("$nick just left $channel");
+    if(!$QUIET_STATUS) {
+        to_channel("* left: $nick",$TO_JABBER);
+    };
+}
+
+sub irc_on_quit {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $reason) = @_[ARG0..$#_];
+    my $nick = irc_get_nick($nickstring);
+
+    $kernel->yield('on_time');
+
+    #debug("$nick just quit ($reason)");
+    if (! $QUIET_STATUS) {
+        to_channel("* quit: $nick ($reason)",$TO_JABBER);
+    };
+}
+
+# we're invited to a channel
+sub irc_on_invite {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $channel) = @_[ARG0..$#_];
+    my $nick = irc_get_nick($nickstring);
+
+    $kernel->yield('on_time');
+
+    debug("Invited to $channel by $nick\n");
+#    $kernel->post($irc_client=>join=>$channel);
+}
+
+# we've been kicked.
+sub irc_on_kick {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $channel, $kicked, $reason) = @_[ARG0..$#_];
+    my $nick = irc_get_nick($nickstring);
+
+    $kernel->yield('on_time');
+
+    if (lc($kicked) eq lc($heap->{config}{nick})) {
+        debug("Kicked from $channel by $nickstring ($reason)\n");
+
+        # remember we were kicked.
+        delete $heap->{channels}{$channel};
+
+        # Try to join again anyway.
+        $kernel->post($irc_client=>join=>$channel);
+    }
+    else {
+        to_channel("* kicked: $kicked by $nickstring ($reason)",$TO_JABBER);
+        #debug("$kicked kicked from $channel by $nickstring ($reason)\n");
+    }
+}
+
+sub irc_on_mode {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($nickstring, $channel, $mode, @ops) = @_[ARG0..$#_];
+    my $who = irc_get_nick($nickstring) || "<unknown>";
+
+    debug("$who set mode $mode in $channel for ".join(",", @ops));
+
+    $kernel->yield('on_time');
+
+    my @modes = split(//, $mode);
+    my $type = shift(@modes); # + or -?
+    @modes = grep(/[ovm]/, @modes); # the ones that affect people.
+
+    # we don't really do much useful unless a mode got added.
+    return unless $type eq "+";
+    for my $nick (@ops) {
+        $nick = lc($nick);
+        my $m = shift(@modes);
+        if ($nick eq lc($heap->{config}{nick}) and $m eq 'o') {
+            debug("Hey! I got opped!");
+            $kernel->post($irc_client, 'names', $channel) if $channel;
+        } elsif ($m eq 'o') {
+#            debug("I don't need to op $nick any more, then");
+            delete $heap->{to_op}{$channel}{lc($nick)};
+        } elsif ($m eq 'v') {
+#            debug("I don't need to voice $nick any more, then");
+            delete $heap->{to_voice}{$channel}{lc($nick)};
+        }
+
+    }
+
+}
+
+
+sub irc_on_nick {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+    my ($fromraw, $nick) = @_[ARG0..$#_];
+    # If people change nicks, we should notice if they need opping.
+
+    $kernel->yield('on_time');
+
+    #debug("$from changed nick to $nick");
+    my $from = irc_get_nick($fromraw) || '<noone>';
+    if (! $QUIET_STATUS) {
+        to_channel("* nick: $from is now $nick",$TO_JABBER);
+    };
+}
+
+sub irc_on_names {
+    my ($kernel, $heap, $session, $server, $message) = @_[KERNEL, HEAP, SESSION, ARG0, ARG1];
+    $kernel->yield('on_time');
+
+    my (undef, $channel, @names) = split(/\s/, $message);
+    $names[0] =~ s/^\://; # FFS
+    $heap->{names}{$channel}{$_}++ for (@names);
+    #debug("People in $channel: ".join(",", @names));
+    @names = map { s/^@//; $_; } grep($_ ne $IRC_NICK,@names);
+    to_channel("* members: ".join(", ",sort { lc($a) cmp lc($b) } @names),$TO_JABBER);
+}
+
+sub irc_on_names_done {
+    my ($kernel, $heap, $session, $server, $message) = @_[KERNEL, HEAP, SESSION, ARG0, ARG1];
+    my ($channel) = split(/\s/, $message);
+    for (keys(%{$heap->{names}{$channel}})) {
+#        my $op = 1 if s!^@!!;
+#        my $voice = 1 if s!^\+!!;
+#        if (!$op and $kernel->call($session, 'trust', $channel, $_)) {
+#            $heap->{to_op}{lc($channel)}{lc($_)}++;
+#        } elsif (!$op and !$voice and $kernel->call($session, 'believe', $channel, $_)) {
+#            $heap->{to_voice}{lc($channel)}{lc($_)}++;
+#        }
+    }
+    delete $heap->{names}{$channel};
+}
+
+sub irc_on_topicraw {
+    my ($kernel, $heap, $session, $server, $raw) = @_[KERNEL, HEAP, SESSION, ARG0, ARG1];
+    my ($channel, $topic) = split(/ :/, $raw, 2);
+    $kernel->call($session, 'irc_topic', undef, $channel, $topic);
+}
+
+sub irc_on_topic {
+    my ($kernel, $heap, $nickraw, $channel, $topic) = @_[KERNEL, HEAP, ARG0, ARG1, ARG2];
+    my $nick = irc_get_nick($nickraw) || '<noone>';
+    $kernel->yield('on_time');
+
+    debug("$nick changed topic of $channel to $topic");
+}
+
+sub irc_do_op {
+    my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+#    debug("op?");
+
+#    my @all_ops = keys(%{$heap->{to_op}{all}});
+#    for my $c (keys(%{$heap->{channels}})) {
+#        $heap->{to_op}{$c}{$_}++ for (@all_ops);
+#    }
+#
+#    foreach my $channel (keys(%{$heap->{to_op}})) {
+#        my @nicks = keys(%{$heap->{to_op}{$channel}});
+#        next unless $nicks[0];
+#        debug("In $channel, I need to op ".join(",", @nicks));
+#        while (@nicks) {
+#            my @s = splice(@nicks, 0, 3);
+#            $kernel->post($irc_client=>mode=>"$channel +ooo ".join(" ", @s));
+##            debug("  /mode $channel +ooo ".join(" ", @s));
+#        }
+#    }
+#    delete $heap->{to_op};
+#
+#    foreach my $channel (keys(%{$heap->{to_voice}})) {
+#        my @nicks = keys(%{$heap->{to_voice}{$channel}});
+#        next unless $nicks[0];
+#        debug("In $channel, I need to voice ".join(",", @nicks));
+#        while (@nicks) {
+#            my @s = splice(@nicks, 0, 3);
+#            $kernel->post($irc_client=>mode=>"$channel +vvv ".join(" ", @s));
+##            debug("  /mode $channel +vvv ".join(" ", @s));
+#        }
+#    }
+#    delete $heap->{to_voice};
+#
+#    $kernel->delay("do_op", $heap->{config}{delay} || 3);
+}
+
+sub irc_on_time {
+    my ($kernel, $heap) = @_[KERNEL, HEAP];
+
+    # Delay reconnect
+    $kernel->delay('reconnect', $IRC_RECONNECT_TIMER);
+    # Delay the TIME request
+    $kernel->delay('want_time', $IRC_TIME_DELAY);
+    return;
+}
+
+sub irc_want_time {
+    my ($kernel, $heap) = @_[KERNEL, HEAP];
+
+    # Request time from server
+    $kernel->post($irc_client,'time');
+    # Refire request
+    $kernel->delay('want_time', $IRC_TIME_DELAY);
+}
+
+# We'll only get here if there hasn't been a ping in the last 200 secs. We can
+# assume we've lost the connection.
+sub irc_reconnect {
+    my ($kernel, $heap) = @_[KERNEL, HEAP];
+
+    debug("REJOIN: I think I lost my server connection");
+    debug("  disconnecting..");
+    $kernel->call($irc_client, 'disconnect');
+    debug("  shutting down..");
+    $kernel->call($irc_client, 'shutdown');
+    debug("  creating new Poco::IRC");
+    $poeirc = POE::Component::IRC->spawn('alias' => $irc_client);
+    debug("  registering..");
+    $kernel->post($irc_client=>register=>'all');
+    $kernel->post($irc_client=>connect=>$heap->{connect});
+    $kernel->delay('want_time', $IRC_TIME_DELAY);
+    $kernel->delay('reconnect', 30); # Try quite frequently till we get somewhere.
+}
+
+
+#
+# Support functions
+#
+
+sub to_channel
+{
+    my ($msg,$dest)=@_;
+
+    if ($dest eq $TO_JABBER) {
+        jabber_msg('groupchat', $msg, $JABBER_CHAN_NAME,$JABBER_ID);
+    }
+    elsif ($dest eq $TO_IRC) {
+        $poe_kernel->post($irc_client, 'privmsg', $IRC_CHAN, $msg);
+    }
+    else {
+        die "Unknown to_channel dest: '$dest'\n";
+    }
+}
+
+# Returns true if command known
+sub process_cmd
+{
+    my ($kernel,$cmd,$dest)=@_;
+
+    if ($cmd eq "help") {
+        to_channel("${CMD_PREFIX}who - shows who is on the other channel",$dest);
+        to_channel("${CMD_PREFIX}shutdown - shutdown bridge (will probably attempt to rejoin after a few seconds)",$dest);
+    }
+    elsif ($cmd eq "who") {
+        if ($dest eq $TO_JABBER) {
+            $poe_kernel->post($irc_client, 'names', $IRC_CHAN);
+        }
+        else {
+            to_channel("* members: ".join(", ",sort { lc($a) cmp lc($b) } keys %jabber_chan_members),$TO_IRC);
+        }
+    }
+    elsif ($cmd eq "shutdown") {
+        exit(0);
+    }
+    else {
+        return 0;
+    }
+    return 1;
+}
+
+
+POE::Kernel->run();
+exit;
+
+# vim: softtabstop=4 shiftwidth=4 expandtab tabstop=4

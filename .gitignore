@@ -1,0 +1,8 @@
+jirc.log
+jirc.log*
+nohup*
+jirc-*.tar.gz
+pm_to_blib
+blib
+Makefile
+Makefile.old
