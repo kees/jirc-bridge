@@ -1,0 +1,16 @@
+This is a Perl POE bot script that connects a Jabber conference room with an
+IRC channel, relaying conversations.
+
+Configuration items are read from jirc.conf in the local directory.
+
+Please send updates and patches!  :)
+
+Dependencies (Debian package names):
+  libconfig-simple-perl
+  libfilter-template-perl
+  libnet-jabber-perl
+  libpoe-component-irc-perl
+  libpoe-component-jabber-perl
+  libxml-stream-perl
+
+Kees Cook <kees@outflux.net>

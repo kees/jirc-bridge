@@ -1,0 +1,4 @@
+.bzr*
+MANIFEST.SKIP
+Makefile
+*gz
