@@ -649,6 +649,10 @@ sub jabber_on_message
     ($channel,$who) = split('/',$from);
     my ($jid,$res) = split('/',$to);
 
+    if ($who ~~ m/&\#/) {
+	    $who =~ s/&\#x([a-fA-F\d]+);/chr(hex($1))/ge;
+    }
+
     # from the channel itself:
     # Tue Feb 15 08:58:28 2005: message: <message from='ktest@conference.gristle.org' to='jirc@gristle.org/testing' type='groupchat'><body>nem has become available</body></message>
 
